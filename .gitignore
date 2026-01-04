@@ -1,0 +1,9 @@
+# workspace/
+workspace/
+
+# bin
+/bin/
+
+# virtual environments
+/venv/
+/.venv/
