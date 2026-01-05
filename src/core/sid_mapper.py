@@ -2,10 +2,36 @@ import os
 import csv
 import xml.etree.ElementTree as ET
 from Evtx import Evtx as evtx_module
+from Registry import Registry
 
 class SIDMapper:
     def __init__(self):
         self.master_map = []
+        self.sid_to_folder = {}
+    
+    def parse_software_hive(self, software_path):
+        """SOFTWARE 하이브에서 SID와 사용자 폴더 경로 매핑 추출"""
+        if not os.path.exists(software_path):
+            return
+
+        try:
+            reg = Registry.Registry(software_path)
+            # ProfileList 경로
+            key_path = r"Microsoft\Windows NT\CurrentVersion\ProfileList"
+            profile_list_key = reg.open(key_path)
+
+            for subkey in profile_list_key.subkeys():
+                sid = subkey.name() # 키 이름이 바로 SID
+                try:
+                    path_value = subkey.value("ProfileImagePath").value()
+                    folder_name = os.path.basename(path_value.replace('\\', '/'))
+                    self.sid_to_folder[sid] = folder_name
+
+                    print(f"[DEBUG] 매핑 추가: {sid} -> {folder_name}")
+                except:
+                    continue
+        except Exception as e:
+            print(f"SOFTWARE 하이브 파싱 에러: {e}")
 
     def parse_evtx_file(self, evtx_path, vhd_id):
         if not os.path.exists(evtx_path):

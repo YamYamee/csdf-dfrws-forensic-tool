@@ -65,20 +65,25 @@ class MappingThread(QThread):
         self.vhd_info_list = vhd_info_list
 
     def run(self):
-        # 코어 로직 클래스 인스턴스화
         mapper = SIDMapper()
         
         for info in self.vhd_info_list:
             vhd_id = info['vhd_id']
             workspace = info['workspace']
-            # 추출된 파일명 규칙 적용
-            evtx_path = os.path.join(workspace, "Windows_System32_winevt_Logs_Security.evtx")
             
+            # 1. SOFTWARE 하이브 먼저 분석 (폴더명 확보)
+            soft_dir = os.path.join(workspace, "Windows_System32_config")
+            soft_path = os.path.join(soft_dir, "SOFTWARE")
+            if os.path.exists(soft_path):
+                print(f"레지스트리 분석 중: {vhd_id}")
+                mapper.parse_software_hive(soft_path)
+
+            # 2. Security.evtx 분석 (이벤트 & SID 확보)
+            evtx_dir = os.path.join(workspace, "Windows_System32_winevt_Logs")
+            evtx_path = os.path.join(evtx_dir, "Security.evtx")
             if os.path.exists(evtx_path):
-                self.progress.emit(f"로그 파싱 중: {vhd_id}")
+                print(f"로그 파싱 중: {vhd_id}")
                 mapper.parse_evtx_file(evtx_path, vhd_id)
-            else:
-                self.progress.emit(f"파일 없음 건너뜀: {vhd_id}")
 
         # 분석 완료 후 CSV 저장 (루트 워크스페이스에 저장)
         csv_path = os.path.join("workspace", "integrated_sid_map.csv")
@@ -133,6 +138,10 @@ class VDIIntegratorGUI(QMainWindow):
         self.chk_security.setChecked(True) 
         self.chk_security.setEnabled(False) 
 
+        self.chk_software = QCheckBox("SOFTWARE Hive (Registry)")
+        self.chk_software.setChecked(True)
+        self.chk_software.setEnabled(False)
+
         self.progress_bar = QProgressBar()
         self.log_output = QLabel("Ready")
         self.btn_start = QPushButton("Start Analysis")
@@ -142,6 +151,7 @@ class VDIIntegratorGUI(QMainWindow):
         opt_layout.addWidget(self.chk_prefetch)
         opt_layout.addWidget(self.chk_edge)
         opt_layout.addWidget(self.chk_security)
+        opt_layout.addWidget(self.chk_software)
         opt_layout.addStretch()
         opt_layout.addWidget(self.log_output)
         opt_layout.addWidget(self.progress_bar)
@@ -165,8 +175,19 @@ class VDIIntegratorGUI(QMainWindow):
     def _create_mapping_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        self.mapping_table = QTableWidget(0, 3)
-        self.mapping_table.setHorizontalHeaderLabels(["SID", "Username", "Source"])
+        
+        btn_layout = QHBoxLayout()
+        self.btn_map_sid = QPushButton("Extract & Map SID")
+        self.btn_map_sid.clicked.connect(self.start_sid_mapping)
+        self.btn_map_sid.setStyleSheet("height: 30px; font-weight: bold;")
+        btn_layout.addWidget(self.btn_map_sid)
+        btn_layout.addStretch()
+        
+        self.mapping_table = QTableWidget(0, 5) 
+        self.mapping_table.setHorizontalHeaderLabels(["Timestamp", "Mantra ID", "SID", "Folder Name", "Source VHD"])
+        self.mapping_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        layout.addLayout(btn_layout)
         layout.addWidget(self.mapping_table)
         return widget
 
@@ -193,6 +214,9 @@ class VDIIntegratorGUI(QMainWindow):
         if self.chk_security.isChecked():
             artifacts.append('Windows/System32/winevt/Logs/Security.evtx')
             selected_names.append("Security Logs")
+        if self.chk_software.isChecked():
+            artifacts.append('Windows/System32/config/SOFTWARE')
+            selected_names.append("SOFTWARE Hive (Registry)")
 
         for i in range(self.tabs.count() - 1, 2, -1):
             self.tabs.removeTab(i)
@@ -342,27 +366,6 @@ class VDIIntegratorGUI(QMainWindow):
         self.btn_start.setEnabled(True)
         QMessageBox.information(self, "Done", "분석이 완료되었습니다.")
 
-    def _create_mapping_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # 버튼 영역
-        btn_layout = QHBoxLayout()
-        self.btn_map_sid = QPushButton("Extract & Map SID (Security.evtx)")
-        self.btn_map_sid.clicked.connect(self.start_sid_mapping)
-        self.btn_map_sid.setStyleSheet("height: 30px; font-weight: bold;")
-        btn_layout.addWidget(self.btn_map_sid)
-        btn_layout.addStretch()
-        
-        # 매핑 테이블
-        self.mapping_table = QTableWidget(0, 4)
-        self.mapping_table.setHorizontalHeaderLabels(["Timestamp", "Mantra ID", "SID", "Source VHD"])
-        self.mapping_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        
-        layout.addLayout(btn_layout)
-        layout.addWidget(self.mapping_table)
-        return widget
-
     def start_sid_mapping(self):
         """매핑 시작 버튼 핸들러"""
         if not hasattr(self, 'extracted_info') or not self.extracted_info:
@@ -376,14 +379,22 @@ class VDIIntegratorGUI(QMainWindow):
         self.mapping_worker.start()
 
     def update_mapping_table(self, mapping_list):
-        """파싱된 데이터를 테이블에 출력"""
+        """파싱된 데이터를 테이블에 출력 (Folder Name 포함)"""
         self.mapping_table.setRowCount(0)
+        # 정렬 잠시 끄기
+        self.mapping_table.setSortingEnabled(False)
+        
         for row, data in enumerate(mapping_list):
             self.mapping_table.insertRow(row)
-            self.mapping_table.setItem(row, 0, QTableWidgetItem(data['time']))
-            self.mapping_table.setItem(row, 1, QTableWidgetItem(data['user']))
-            self.mapping_table.setItem(row, 2, QTableWidgetItem(data['sid']))
-            self.mapping_table.setItem(row, 3, QTableWidgetItem(data['vhd']))
+            self.mapping_table.setItem(row, 0, QTableWidgetItem(data.get('time', 'N/A')))
+            self.mapping_table.setItem(row, 1, QTableWidgetItem(data.get('user', 'N/A')))
+            self.mapping_table.setItem(row, 2, QTableWidgetItem(data.get('sid', 'N/A')))
+            self.mapping_table.setItem(row, 3, QTableWidgetItem(data.get('folder_name', 'Unknown')))
+            self.mapping_table.setItem(row, 4, QTableWidgetItem(data.get('vhd', 'N/A')))
+            
+        # 다시 정렬 켜기 및 시간순 정렬
+        self.mapping_table.setSortingEnabled(True)
+        self.mapping_table.sortItems(0, Qt.DescendingOrder)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
