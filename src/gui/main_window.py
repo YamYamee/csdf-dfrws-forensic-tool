@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel,
     QGroupBox, QFileDialog, QProgressBar, QTabWidget, QTreeWidget, 
     QTreeWidgetItem, QHeaderView, QListWidget, QCheckBox, QMessageBox
+    , QComboBox, QLineEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from datetime import datetime
@@ -13,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from src.core.vhd_manager import EvidenceManager 
 from src.core.sid_mapper import SIDMapper
 from src.parser.prefetch_parser import PrefetchParser
+from src.parser.edge_history_parser import EdgeHistoryParser
 
 class AnalysisThread(QThread):
     progress = pyqtSignal(str)
@@ -37,12 +39,9 @@ class AnalysisThread(QThread):
             for art_path in self.selected_artifacts:
                 current_step += 1
                 self.progress.emit(f"분석 중: {vhd_name} -> {art_path}")
-                
-                # [수정 포인트] 이제 detailed_results는 리스트입니다.
                 detailed_results = manager.extract_single_target(art_path)
                 
                 for res in detailed_results:
-                    # 개별 유저(또는 파일)마다 한 줄씩 UI에 추가 요청
                     self.item_processed.emit({
                         'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         'artifact': res['path'], # 구체적인 유저 경로
@@ -101,6 +100,7 @@ class VDIIntegratorGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.extracted_info = []
+        self.user_to_folder_map = {}
         self.setWindowTitle("VDI Artifact Integrator")
         self.setGeometry(100, 100, 1100, 700)
         self.init_ui()
@@ -193,6 +193,36 @@ class VDIIntegratorGUI(QMainWindow):
         layout.addLayout(btn_layout)
         layout.addWidget(self.mapping_table)
         return widget
+    
+    def _create_edge_result_tab(self): # Edge History 결과 탭
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # 1. 상단 사용자 선택 영역
+        select_group = QGroupBox("Target User Selection")
+        select_layout = QHBoxLayout()
+        
+        self.combo_user = QComboBox() # 사용자 이름 (Mapping 결과에서 가져옴)
+        self.combo_user.setMinimumWidth(150)
+        
+        btn_analyze = QPushButton("Analyze Selected User's Edge History")
+        btn_analyze.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; height: 30px;")
+        btn_analyze.clicked.connect(self.run_targeted_edge_analysis)
+
+        select_layout.addWidget(QLabel("Select User (Email):"))
+        select_layout.addWidget(self.combo_user)
+        select_layout.addWidget(btn_analyze)
+        select_layout.addStretch()
+        select_group.setLayout(select_layout)
+
+        # 2. 결과 테이블
+        self.edge_table = QTableWidget(0, 5)
+        self.edge_table.setHorizontalHeaderLabels(["Visit Time", "User (Email)", "Title", "URL", "Source"])
+        self.edge_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        layout.addWidget(select_group)
+        layout.addWidget(self.edge_table)
+        return widget
 
     def add_vhds(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select Files", "", "Forensic Images (*.e01 *.vhd *.vhdx)")
@@ -206,12 +236,13 @@ class VDIIntegratorGUI(QMainWindow):
         
         # 1. 선택된 아티팩트 확인
         artifacts = []
-        selected_names = [] # 탭 생성용 이름
+        selected_names = [] 
         
         if self.chk_prefetch.isChecked():
             artifacts.append('Windows/Prefetch')
             selected_names.append("Prefetch")
         if self.chk_edge.isChecked():
+            # [중요] 경로 끝에 History 파일까지 명시
             artifacts.append('Users/*/AppData/Local/Microsoft/Edge/User Data/Default/History')
             selected_names.append("Edge History")
         if self.chk_security.isChecked():
@@ -221,6 +252,7 @@ class VDIIntegratorGUI(QMainWindow):
             artifacts.append('Windows/System32/config/SOFTWARE')
             selected_names.append("SOFTWARE Hive (Registry)")
 
+        # 기존 동적 탭 제거
         for i in range(self.tabs.count() - 1, 2, -1):
             self.tabs.removeTab(i)
 
@@ -231,31 +263,61 @@ class VDIIntegratorGUI(QMainWindow):
             tab_layout = QVBoxLayout(tab)
             
             if name == "Prefetch":
-                # 통합 분석 버튼 추가
                 btn_parse = QPushButton("Prefetch Analysis")
                 btn_parse.setStyleSheet("height: 35px; background-color: #4CAF50; color: white; font-weight: bold;")
-                btn_parse.clicked.connect(self.run_prefetch_parser) # 로직 연결
+                btn_parse.clicked.connect(self.run_prefetch_parser)
                 tab_layout.addWidget(btn_parse)
                 
-                # 테이블 헤더 변경: Timestamp, Name, Count, Source
                 table = QTableWidget(0, 4)
                 table.setHorizontalHeaderLabels(["Last Run Time", "Process Name", "Run Count", "Source VHD"])
+                self.artifact_tables[name] = table # 테이블 등록
+                tab_layout.addWidget(table)
+
+            elif name == "Edge History":
+                select_group = QGroupBox("Manual Target Selection")
+                select_layout = QHBoxLayout()
+                
+                # [수정] 콤보박스 대신 직접 입력창 사용
+                self.input_folder_name = QLineEdit()
+                self.input_folder_name.setPlaceholderText("폴더명 입력")
+                self.input_folder_name.setMinimumWidth(200)
+                self.input_folder_name.setFixedHeight(30)
+                
+                btn_analyze = QPushButton("Analyze History")
+                btn_analyze.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; height: 30px;")
+                btn_analyze.clicked.connect(self.run_targeted_edge_analysis)
+
+                select_layout.addWidget(QLabel("Folder Name:"))
+                select_layout.addWidget(self.input_folder_name)
+                select_layout.addWidget(btn_analyze)
+                select_layout.addStretch()
+                select_group.setLayout(select_layout)
+
+                self.edge_table = QTableWidget(0, 5)
+                self.edge_table.setHorizontalHeaderLabels(["Visit Time", "Folder Name", "Title", "URL", "Source"])
+                self.edge_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+                
+                tab_layout.addWidget(select_group)
+                tab_layout.addWidget(self.edge_table)
+                self.artifact_tables[name] = self.edge_table
+
             else:
                 table = QTableWidget(0, 4)
                 table.setHorizontalHeaderLabels(["VHD Source", "Artifact Path", "Status", "Message"])
-            
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            tab_layout.addWidget(table)
-            self.tabs.addTab(tab, f"{name} 결과")
-            self.artifact_tables[name] = table
+                tab_layout.addWidget(table)
+                self.artifact_tables[name] = table
 
-        # 기존 로직 수행
+            table_to_resize = self.artifact_tables[name]
+            table_to_resize.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.tabs.addTab(tab, f"{name} 결과")
+
+        # 분석 스레드 시작 (이 코드가 실행되어야 버튼이 먹힙니다!)
         self.result_tree.clear()
-        self.tabs.setCurrentIndex(1) # 'Results' 탭으로 우선 이동
+        self.tabs.setCurrentIndex(1) 
         self.btn_start.setEnabled(False)
 
         self.worker = AnalysisThread(vhd_paths, artifacts)
-        self.worker.item_processed.connect(self.add_result_row_and_tab) # 핸들러 변경
+        self.worker.item_processed.connect(self.add_result_row_and_tab)
         self.worker.progress.connect(self.log_output.setText)
         self.worker.vhd_done.connect(self.progress_bar.setValue)
         self.worker.finished.connect(self.on_analysis_finished)
@@ -382,22 +444,94 @@ class VDIIntegratorGUI(QMainWindow):
         self.mapping_worker.start()
 
     def update_mapping_table(self, mapping_list):
-        """파싱된 데이터를 테이블에 출력 (Folder Name 포함)"""
+        """파싱된 데이터를 테이블에 출력하고 Edge 분석용 콤보박스 업데이트"""
         self.mapping_table.setRowCount(0)
-        # 정렬 잠시 끄기
-        self.mapping_table.setSortingEnabled(False)
+        self.user_to_folder_map = {} # 초기화
         
+        # 콤보박스가 이미 생성되어 있는지 확인 후 초기화
+        if hasattr(self, 'combo_user'):
+            self.combo_user.clear()
+
         for row, data in enumerate(mapping_list):
             self.mapping_table.insertRow(row)
             self.mapping_table.setItem(row, 0, QTableWidgetItem(data.get('time', 'N/A')))
             self.mapping_table.setItem(row, 1, QTableWidgetItem(data.get('user', 'N/A')))
             self.mapping_table.setItem(row, 2, QTableWidgetItem(data.get('sid', 'N/A')))
-            self.mapping_table.setItem(row, 3, QTableWidgetItem(data.get('folder_name', 'Unknown')))
+            
+            folder = data.get('folder_name', 'Unknown')
+            self.mapping_table.setItem(row, 3, QTableWidgetItem(folder))
             self.mapping_table.setItem(row, 4, QTableWidgetItem(data.get('vhd', 'N/A')))
             
-        # 다시 정렬 켜기 및 시간순 정렬
+            # [핵심] 유저 식별자 생성 (이름 + VHD명)
+            user_id = data.get('user', 'Unknown')
+            vhd_id = data.get('vhd', 'Unknown')
+            display_name = f"{user_id} ({vhd_id})"
+
+            # 폴더명이 유효할 때만 콤보박스에 추가
+            if folder and folder != "Unknown" and folder != "systemprofile":
+                self.user_to_folder_map[display_name] = folder
+                if hasattr(self, 'combo_user'):
+                    self.combo_user.addItem(display_name)
+
         self.mapping_table.setSortingEnabled(True)
         self.mapping_table.sortItems(0, Qt.DescendingOrder)
+        
+        print(f"[DEBUG] 콤보박스 업데이트 완료: {list(self.user_to_folder_map.keys())}")
+
+    def run_targeted_edge_analysis(self):
+        """입력된 폴더명을 기반으로 워크스페이스 내 History 파싱"""
+        # 입력창에서 텍스트 직접 가져오기
+        folder_name = self.input_folder_name.text().strip()
+
+        self.edge_table.setSortingEnabled(False)
+        self.edge_table.setRowCount(0)
+        
+        if not folder_name:
+            QMessageBox.warning(self, "경고", "분석할 사용자 폴더명을 입력하세요.")
+            return
+
+        self.edge_table.setSortingEnabled(False)
+        self.edge_table.setRowCount(0)
+        parser = EdgeHistoryParser()
+
+        # 파일명 규칙: Users_FolderName_AppData_Local_Microsoft_Edge_User_Data_Default_History
+        found_any = False
+        
+        # 추출된 워크스페이스 정보들을 순회
+        for info in self.extracted_info:
+            workspace = info['workspace']
+            vhd_id = info['vhd_id']
+            
+            # TODO 공백 관리하기
+            target_filename = f"Users_{folder_name}_AppData_Local_Microsoft_Edge_User Data_Default\History"
+            file_path = os.path.join(workspace, target_filename)
+
+            print(f"[DEBUG] 분석 시도 경로: {file_path}")
+
+            if os.path.exists(file_path):
+                print(f"[INFO] 분석 타겟 발견: {file_path}")
+                self.log_output.setText(f"분석 중: {folder_name}'s History")
+                
+                history_data = parser.parse(file_path)
+                
+                # 테이블에 데이터 삽입
+                for data in history_data:
+                    row = self.edge_table.rowCount()
+                    self.edge_table.insertRow(row)
+                    self.edge_table.setItem(row, 0, QTableWidgetItem(data['time']))
+                    self.edge_table.setItem(row, 1, QTableWidgetItem(folder_name))
+                    self.edge_table.setItem(row, 2, QTableWidgetItem(data['title']))
+                    self.edge_table.setItem(row, 3, QTableWidgetItem(data['url']))
+                    self.edge_table.setItem(row, 4, QTableWidgetItem(vhd_id))
+                found_any = True
+
+        if found_any:
+            self.edge_table.setSortingEnabled(True)
+            self.edge_table.sortItems(0, Qt.DescendingOrder)
+            self.log_output.setText(f"{folder_name} 분석 완료")
+        else:
+            QMessageBox.critical(self, "실패", 
+                f"워크스페이스에서 다음 파일을 찾지 못했습니다:\n{target_filename}\n\n폴더명이 정확한지 'User Mapping' 탭에서 확인하세요.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
