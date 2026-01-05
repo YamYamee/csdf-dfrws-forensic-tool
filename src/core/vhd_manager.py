@@ -106,10 +106,23 @@ class EvidenceManager:
             except: continue
 
     def _save_entry(self, entry, full_path):
-        """파일시스템 항목을 워크스페이스에 저장"""
+        """파일시스템 항목을 워크스페이스 내의 해당 아티팩트 전용 폴더에 저장"""
         try:
-            safe_name = full_path.replace('/', '_').lstrip('_')
-            save_path = os.path.join(self.workspace, safe_name)
+            # 1. 상위 폴더 경로 추출 및 정리
+            # 예: '/Windows/Prefetch/CMD.EXE-123.pf' -> 'Windows_Prefetch'
+            dir_name = os.path.dirname(full_path).replace('\\', '/').strip('/')
+            rel_dir = dir_name.replace('/', '_')
+            
+            target_dir = os.path.join(self.workspace, rel_dir)
+
+            # 2. 폴더 생성
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+
+            # 3. 파일 저장
+            file_name = os.path.basename(full_path)
+            save_path = os.path.join(target_dir, file_name)
+
             with open(save_path, "wb") as f:
                 offset = 0
                 size = entry.info.meta.size
@@ -118,4 +131,6 @@ class EvidenceManager:
                     f.write(entry.read_random(offset, chunk))
                     offset += chunk
             return True
-        except: return False
+        except Exception as e:
+            logger.error(f"저장 실패 ({full_path}): {e}")
+            return False
