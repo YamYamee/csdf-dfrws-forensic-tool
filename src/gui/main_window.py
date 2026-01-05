@@ -38,15 +38,18 @@ class AnalysisThread(QThread):
                 current_step += 1
                 self.progress.emit(f"분석 중: {vhd_name} -> {art_path}")
                 
-                success, message = manager.extract_single_target(art_path)
+                # [수정 포인트] 이제 detailed_results는 리스트입니다.
+                detailed_results = manager.extract_single_target(art_path)
                 
-                self.item_processed.emit({
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'artifact': art_path,
-                    'status': "Success" if success else "Failed",
-                    'message': message,
-                    'source': vhd_name
-                })
+                for res in detailed_results:
+                    # 개별 유저(또는 파일)마다 한 줄씩 UI에 추가 요청
+                    self.item_processed.emit({
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'artifact': res['path'], # 구체적인 유저 경로
+                        'status': "Success" if res['success'] else "Failed",
+                        'message': res['message'],
+                        'source': vhd_name
+                    })
 
                 percent = int((current_step / total_steps) * 100)
                 self.vhd_done.emit(percent)

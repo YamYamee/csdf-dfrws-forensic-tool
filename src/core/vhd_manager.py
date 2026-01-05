@@ -2,6 +2,7 @@ import os
 import pytsk3
 import pyewf
 import logging
+import traceback
 from datetime import datetime
 
 logger = logging.getLogger("ForensicAnalyzer")
@@ -19,19 +20,50 @@ class EWFImgInfo(pytsk3.Img_Info):
 class EvidenceManager:
     def __init__(self, image_path, workspace_base="workspace"):
         self.image_path = os.path.abspath(image_path)
-        # extract fortmat from image path
         self.extension = os.path.splitext(self.image_path)[1].lower()
         self.workspace = os.path.abspath(os.path.join(workspace_base, os.path.basename(image_path).replace(".", "_")))
         os.makedirs(self.workspace, exist_ok=True)
+        
         self.img_info = self._init_image_handle()
-        # initialize filesystem info
         self.fs_info = None
+
         if self.img_info:
             try:
-                # TODO start from offest 0, may need to adjust for partitioned images
-                self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
-            except:
-                logger.error(f"파일시스템 로드 실패: {self.image_path}")
+                volume = pytsk3.Volume_Info(self.img_info)
+                for partition in volume:
+                    # 1. 너무 작은 파티션은 건너뜀 (예: 1GB 미만)
+                    if partition.len < 2048 * 1024: # 섹터 수 기준 (약 1GB)
+                        continue
+
+                    offset = partition.start * 512
+                    try:
+                        temp_fs = pytsk3.FS_Info(self.img_info, offset=offset)
+                        
+                        # 2. [검증 로직] 해당 파티션 루트에 Windows나 Users 폴더가 있는지 확인
+                        root_dir = temp_fs.open_dir(path="/")
+                        found_os = False
+                        for entry in root_dir:
+                            name = entry.info.name.name.decode('utf-8', 'replace')
+                            if name.lower() in ["windows", "users"]:
+                                found_os = True
+                                break
+                        
+                        if found_os:
+                            self.fs_info = temp_fs
+                            print(f"[SUCCESS] OS 파티션 확정! Offset: {offset}")
+                            break # 진짜를 찾았으므로 종료
+                            
+                    except:
+                        continue
+                
+                # 끝까지 못 찾았을 경우 대비 (Logical Image 대응)
+                if not self.fs_info:
+                    self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
+                    
+            except Exception as e:
+                print(f"[DEBUG] 파티션 분석 중 오류: {e}")
+                try: self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
+                except: pass
 
     def _init_image_handle(self):
         try:
@@ -59,27 +91,52 @@ class EvidenceManager:
         return users
 
     def extract_single_target(self, target_path):
-        """단일 타겟(와일드카드 포함) 추출 및 결과 반환"""
-        if not self.fs_info:
-            return False, "파일시스템 연결 불가"
+        """Users 폴더를 직접 스캔하여 개별 유저별 경로를 생성하고 추출"""
+        clean_path = target_path.replace('\\', '/').lstrip('/')
+        detailed_results = []
 
-        if '*' in target_path:
-            users = self._get_user_list()
-            if not users: return False, "사용자 폴더 없음"
-            
-            all_success = True
-            for user in users:
-                resolved = target_path.replace('*', user)
-                if not self._try_extract(resolved):
-                    all_success = False
-            return all_success, f"{len(users)}명 사용자 시도 완료"
+        # 1. 'Users/*' 패턴이 포함된 경우 처리
+        if 'Users/*' in target_path:
+            base_after_user = clean_path.split('Users/*/')[-1]
+            try:
+                # /Users 디렉토리를 열어 실제 폴더 목록 확보
+                users_dir = self.fs_info.open_dir(path="/Users")
+                
+                for entry in users_dir:
+                    name = entry.info.name.name.decode('utf-8', 'replace')
+                    if name in [".", "..", "Public", "All Users", "Default User"]:
+                        continue # 불필요한 시스템 링크 및 특수 폴더 제외
+
+                    # 디렉토리 타입인지 확인 (TSK_FS_META_TYPE_DIR = 2)
+                    if entry.info.meta and entry.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR:
+                        user_specific_path = f"/Users/{name}/{base_after_user}"
+                        
+                        success = self._try_extract(user_specific_path)
+                        detailed_results.append({
+                            'path': user_specific_path,
+                            'success': success,
+                            'message': f"[{name}] 추출 성공" if success else f"[{name}] 추출 실패",
+                            'user': name
+                        })
+            except Exception as e:
+                return [{'path': target_path, 'success': False, 'message': f"Users 스캔 실패: {e}"}]
+
+        # 2. 일반 경로(와일드카드 없음) 처리
         else:
-            success = self._try_extract(target_path)
-            return success, "추출 완료" if success else "파일/폴더 없음"
+            success = self._try_extract(clean_path)
+            detailed_results.append({
+                'path': clean_path,
+                'success': success,
+                'message': "추출 성공" if success else "추출 실패",
+                'user': "System"
+            })
+
+        return detailed_results
 
     def _try_extract(self, path):
         """지정된 경로에서 파일 또는 폴더 추출 시도"""
         clean_path = '/' + path.replace('\\', '/').lstrip('/')
+        print(f"[DEBUG] 추출 시도 경로: {clean_path}")
         try:
             # 파일시스템 내에서 해당 경로에 무엇이 있는지(파일인지, 폴더인지, 아니면 없는 경로인지) 확인
             entry = self.fs_info.open(clean_path)

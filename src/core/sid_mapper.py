@@ -27,6 +27,18 @@ class SIDMapper:
                     folder_name = os.path.basename(path_value.replace('\\', '/'))
                     self.sid_to_folder[sid] = folder_name
 
+                    if folder_name in ["systemprofile", "Localservice", "Networkservice"]:
+                        continue
+
+                    if not any(item['sid'] == sid for item in self.master_map):
+                        self.master_map.append({
+                        'time': "No Log Found",
+                        'user': "Unknown",
+                        'sid': sid,
+                        'folder_name': folder_name,
+                        'vhd': os.path.basename(os.path.dirname(os.path.dirname(software_path)))
+                    })
+
                     print(f"[DEBUG] 매핑 추가: {sid} -> {folder_name}")
                 except:
                     continue
@@ -39,7 +51,6 @@ class SIDMapper:
 
         try:
             with evtx_module.Evtx(evtx_path) as log:
-                count = 0
                 for record in log.records():
                     node = ET.fromstring(record.xml())
                     
@@ -54,24 +65,41 @@ class SIDMapper:
                     domain = event_data.get("TargetDomainName")
                     logon_type = event_data.get("LogonType")
 
-                    if domain == "NT AUTHORITY" and user_id == "SYSTEM":
+                    # 시스템 계정 및 서비스 계정 필터링
+                    if domain == "NT AUTHORITY" or (user_id and user_id.endswith('$')):
                         continue
 
+                    # 일반 사용자 SID 패턴 확인
                     if user_id and user_sid:
-                        if user_id.endswith('$'): continue
+                        if not (user_sid.startswith("S-1-5-21-") or user_sid.startswith("S-1-12-1-")):
+                            continue
+
+                        event_time = record.timestamp().strftime("%Y-%m-%d %H:%M:%S")
                         
-                        valid_sid = user_sid.startswith("S-1-5-21-") or user_sid.startswith("S-1-12-1-")
+                        # [핵심 수정] 기존 master_map에 해당 SID가 있는지 확인
+                        exists = False
+                        for item in self.master_map:
+                            if item['sid'] == user_sid:
+                                # 기존 항목이 있고, 로그 시간이 더 최신이면 업데이트
+                                item['time'] = event_time
+                                item['user'] = user_id
+                                item['domain'] = domain
+                                item['logon_type'] = logon_type
+                                exists = True
+                                break
                         
-                        if valid_sid:
+                        # 만약 레지스트리에 없던 SID가 로그에만 있다면 새로 추가
+                        if not exists:
                             self.master_map.append({
-                                'time': record.timestamp().strftime("%Y-%m-%d %H:%M:%S"),
+                                'time': event_time,
                                 'user': user_id,
                                 'sid': user_sid,
+                                'folder_name': self.sid_to_folder.get(user_sid, "Unknown"), # 매핑 시도
                                 'domain': domain if domain else "Unknown",
                                 'logon_type': logon_type if logon_type else "-",
                                 'vhd': vhd_id
                             })
-                            count += 1
+
             return True
         except Exception as e:
             print(f"파싱 실패: {e}")
@@ -103,7 +131,7 @@ class SIDMapper:
 
     def save_to_csv(self, output_path, deduplicate=True):
         """
-        결과를 CSV로 저장. 기본적으로 중복 제거를 수행함.
+        결과를 CSV로 저장. folder_name 필드를 명단에 추가함.
         """
         if deduplicate:
             self.deduplicate_map()
@@ -113,11 +141,20 @@ class SIDMapper:
             return False
 
         try:
+            # 출력 경로의 폴더가 없으면 생성
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
             with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-                fieldnames = ['time', 'user', 'sid', 'domain', 'logon_type', 'vhd']
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                # [수정 포인트] folder_name을 fieldnames 리스트에 추가합니다.
+                fieldnames = ['time', 'user', 'sid', 'folder_name', 'domain', 'logon_type', 'vhd']
+                
+                # extrasaction='ignore'를 추가하면 혹시 데이터에 없는 필드가 있어도 에러를 방지해줍니다.
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                
                 writer.writeheader()
                 writer.writerows(self.master_map)
+            
+            print(f"CSV 저장 성공: {output_path}")
             return True
         except Exception as e:
             print(f"CSV 저장 에러: {e}")
