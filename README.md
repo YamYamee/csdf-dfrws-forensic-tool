@@ -76,7 +76,8 @@ prefetch_parser.py: A wrapper that invokes PECmd.exe as a sub-process, ensuring 
 
 # 4. Usage
 
-## 4.1. Prerequisites & InstallationEnsure Python 3.11+ is installed, then run:
+## 4.1. Prerequisites & Installation
+Ensure Python 3.11+ is installed, then run:
 
 ```Bash
 pip install -r requirements.txt
@@ -95,5 +96,6 @@ pip install -r requirements.txt
    ![4](img/4.png)
 5. Data Review: Browse the integrated results in the result tabs.
    ![5](img/5.png)
+
 
 
