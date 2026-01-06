@@ -73,25 +73,19 @@ class MappingThread(QThread):
             vhd_id = info['vhd_id']
             workspace = info['workspace']
             
-            # 1. SOFTWARE 하이브 먼저 분석 (폴더명 확보)
             soft_dir = os.path.join(workspace, "Windows_System32_config")
             soft_path = os.path.join(soft_dir, "SOFTWARE")
             if os.path.exists(soft_path):
-                print(f"레지스트리 분석 중: {vhd_id}")
                 mapper.parse_software_hive(soft_path)
 
-            # 2. Security.evtx 분석 (이벤트 & SID 확보)
             evtx_dir = os.path.join(workspace, "Windows_System32_winevt_Logs")
             evtx_path = os.path.join(evtx_dir, "Security.evtx")
             if os.path.exists(evtx_path):
-                print(f"로그 파싱 중: {vhd_id}")
                 mapper.parse_evtx_file(evtx_path, vhd_id)
 
-        # 분석 완료 후 CSV 저장 (루트 워크스페이스에 저장)
         csv_path = os.path.join("workspace", "integrated_sid_map.csv")
         mapper.save_to_csv(csv_path)
 
-        # UI에 데이터 전송
         self.mapping_done.emit(mapper.master_map)
         self.finished.emit()
 
@@ -121,7 +115,6 @@ class VDIIntegratorGUI(QMainWindow):
         widget = QWidget()
         layout = QHBoxLayout(widget)
 
-        # 이미지 리스트 (좌측)
         vhd_group = QGroupBox("Evidence Files")
         vhd_layout = QVBoxLayout()
         self.vhd_list_widget = QListWidget()
@@ -131,7 +124,6 @@ class VDIIntegratorGUI(QMainWindow):
         vhd_layout.addWidget(btn_add)
         vhd_group.setLayout(vhd_layout)
 
-        # 옵션 (우측)
         opt_group = QGroupBox("Options")
         opt_layout = QVBoxLayout()
         self.chk_prefetch = QCheckBox("Prefetch")
@@ -194,15 +186,14 @@ class VDIIntegratorGUI(QMainWindow):
         layout.addWidget(self.mapping_table)
         return widget
     
-    def _create_edge_result_tab(self): # Edge History 결과 탭
+    def _create_edge_result_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-
-        # 1. 상단 사용자 선택 영역
+        
         select_group = QGroupBox("Target User Selection")
         select_layout = QHBoxLayout()
         
-        self.combo_user = QComboBox() # 사용자 이름 (Mapping 결과에서 가져옴)
+        self.combo_user = QComboBox()
         self.combo_user.setMinimumWidth(150)
         
         btn_analyze = QPushButton("Analyze Selected User's Edge History")
@@ -215,7 +206,6 @@ class VDIIntegratorGUI(QMainWindow):
         select_layout.addStretch()
         select_group.setLayout(select_layout)
 
-        # 2. 결과 테이블
         self.edge_table = QTableWidget(0, 5)
         self.edge_table.setHorizontalHeaderLabels(["Visit Time", "User (Email)", "Title", "URL", "Source"])
         self.edge_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -231,10 +221,9 @@ class VDIIntegratorGUI(QMainWindow):
     def start_analysis(self):
         vhd_paths = [self.vhd_list_widget.item(i).text() for i in range(self.vhd_list_widget.count())]
         if not vhd_paths: 
-            QMessageBox.warning(self, "경고", "분석할 파일이 없습니다.")
+            QMessageBox.warning(self, "Warning", "No files selected for analysis.")
             return
         
-        # 1. 선택된 아티팩트 확인
         artifacts = []
         selected_names = [] 
         
@@ -242,7 +231,6 @@ class VDIIntegratorGUI(QMainWindow):
             artifacts.append('Windows/Prefetch')
             selected_names.append("Prefetch")
         if self.chk_edge.isChecked():
-            # [중요] 경로 끝에 History 파일까지 명시
             artifacts.append('Users/*/AppData/Local/Microsoft/Edge/User Data/Default/History')
             selected_names.append("Edge History")
         if self.chk_security.isChecked():
@@ -252,7 +240,6 @@ class VDIIntegratorGUI(QMainWindow):
             artifacts.append('Windows/System32/config/SOFTWARE')
             selected_names.append("SOFTWARE Hive (Registry)")
 
-        # 기존 동적 탭 제거
         for i in range(self.tabs.count() - 1, 2, -1):
             self.tabs.removeTab(i)
 
@@ -270,16 +257,15 @@ class VDIIntegratorGUI(QMainWindow):
                 
                 table = QTableWidget(0, 4)
                 table.setHorizontalHeaderLabels(["Last Run Time", "Process Name", "Run Count", "Source VHD"])
-                self.artifact_tables[name] = table # 테이블 등록
+                self.artifact_tables[name] = table
                 tab_layout.addWidget(table)
 
             elif name == "Edge History":
                 select_group = QGroupBox("Manual Target Selection")
                 select_layout = QHBoxLayout()
                 
-                # [수정] 콤보박스 대신 직접 입력창 사용
                 self.input_folder_name = QLineEdit()
-                self.input_folder_name.setPlaceholderText("폴더명 입력")
+                self.input_folder_name.setPlaceholderText("Enter Folder Name")
                 self.input_folder_name.setMinimumWidth(200)
                 self.input_folder_name.setFixedHeight(30)
                 
@@ -311,7 +297,6 @@ class VDIIntegratorGUI(QMainWindow):
             table_to_resize.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             self.tabs.addTab(tab, f"{name} 결과")
 
-        # 분석 스레드 시작 (이 코드가 실행되어야 버튼이 먹힙니다!)
         self.result_tree.clear()
         self.tabs.setCurrentIndex(1) 
         self.btn_start.setEnabled(False)
@@ -324,36 +309,30 @@ class VDIIntegratorGUI(QMainWindow):
         self.worker.start()
     
     def run_prefetch_parser(self):
-        """추출된 모든 VHD의 Prefetch를 PECmd로 통합 분석"""
         if not self.extracted_info:
-            QMessageBox.warning(self, "경고", "먼저 'Start Analysis'를 통해 파일 추출을 완료해야 합니다.")
+            QMessageBox.warning(self, "Warning", "Please complete file extraction through 'Start Analysis' first.")
             return
 
         table = self.artifact_tables.get("Prefetch")
-        table.setRowCount(0) # 테이블 초기화
+        table.setRowCount(0)
         
         parser = PrefetchParser(pecmd_path=os.path.join(os.getcwd(), "tools", "PECmd.exe"))
 
         for info in self.extracted_info:
-            workspace = info['workspace'] # 예: workspace/vhd_name
+            workspace = info['workspace']
             
-            # 위에서 만든 폴더 규칙과 일치해야 함
             input_dir = os.path.join(workspace, "Windows_Prefetch") 
             output_dir = os.path.join(workspace, "Analysis_Results")
 
             if os.path.exists(input_dir):
-                # 실제 폴더 안에 .pf 파일이 있는지 최종 확인
                 pf_files = [f for f in os.listdir(input_dir) if f.lower().endswith('.pf')]
                 if not pf_files:
-                    print(f"경고: {input_dir} 에 .pf 파일이 없습니다.")
                     continue
 
-                self.log_output.setText(f"PECmd 분석 중: {info['vhd_id']}")
+                self.log_output.setText(f"Analyzing with PECmd: {info['vhd_id']}")
                 if parser.execute_pecmd(input_dir, output_dir):
-                    # 2. 결과 CSV 로드
                     parsed_data = parser.load_pecmd_csv(output_dir)
                     
-                    # 3. 테이블에 데이터 삽입
                     for data in parsed_data:
                         row = table.rowCount()
                         table.insertRow(row)
@@ -365,25 +344,24 @@ class VDIIntegratorGUI(QMainWindow):
         table.setSortingEnabled(True)
         table.sortItems(0, Qt.DescendingOrder)
         
-        self.log_output.setText("Prefetch 통합 분석 완료")
-        QMessageBox.information(self, "완료", "모든 VHD 이미지의 Prefetch 분석 및 통합이 완료되었습니다.")
+        self.log_output.setText("Prefetch integrated analysis completed")
+        QMessageBox.information(self, "Completed", "Prefetch analysis and integration for all VHD images are complete.")
 
     def on_analysis_finished(self, results):
-        """1단계: 이미지 분석 및 파일 추출 완료 시 호출"""
+        """Step 1: Called when image analysis and file extraction are complete"""
         self.btn_start.setEnabled(True)
         self.extracted_info = results # 중요: 이 리스트가 있어야 SID 매핑이 가능함
-        QMessageBox.information(self, "완료", "파일 추출이 완료되었습니다. 이제 'User Mapping' 탭에서 SID 분석을 진행하세요.")
+        QMessageBox.information(self, "Completed", "File extraction is complete. Now proceed with SID analysis in the 'User Mapping' tab.")
 
     def start_sid_mapping(self):
-        """2단계: 추출된 Security.evtx를 기반으로 SID 매핑 시작"""
+        """Step 2: Start SID mapping based on extracted Security.evtx"""
         if not self.extracted_info:
-            QMessageBox.warning(self, "경고", "먼저 'Input' 탭에서 분석을 완료해야 합니다.")
+            QMessageBox.warning(self, "Warning", "Please complete analysis in the 'Input' tab first.")
             return
 
         self.btn_map_sid.setEnabled(False)
-        self.log_output.setText("SID 매핑 및 로그 파싱 시작...")
+        self.log_output.setText("Starting SID mapping and log parsing...")
 
-        # 외부 스레드 클래스 실행
         self.mapping_worker = MappingThread(self.extracted_info)
         self.mapping_worker.progress.connect(self.log_output.setText)
         self.mapping_worker.mapping_done.connect(self.update_mapping_table)
@@ -392,8 +370,8 @@ class VDIIntegratorGUI(QMainWindow):
 
     def on_mapping_finished(self):
         self.btn_map_sid.setEnabled(True)
-        self.log_output.setText("SID 매핑 완료")
-        QMessageBox.information(self, "완료", "Security.evtx 기반 SID 매핑 및 CSV 저장이 완료되었습니다.")
+        self.log_output.setText("SID mapping completed")
+        QMessageBox.information(self, "Completed", "SID mapping and CSV saving based on Security.evtx are complete.")
 
     def add_result_row(self, info):
         item = QTreeWidgetItem([info['timestamp'], info['artifact'], info['status'], info['message'], info['source']])
@@ -403,11 +381,9 @@ class VDIIntegratorGUI(QMainWindow):
         self.result_tree.scrollToItem(item)
 
     def add_result_row_and_tab(self, info):
-        # 1. 전체 요약(Results 탭)에 추가 (기존 로직)
+        
         self.add_result_row(info)
         
-        # 2. 동적으로 생성된 개별 아티팩트 탭에 데이터 분류해서 추가
-        # info['artifact'] 경로 문자열에 포함된 단어로 매칭
         target_tab = ""
         if "Prefetch" in info['artifact']: target_tab = "Prefetch"
         elif "Edge" in info['artifact']: target_tab = "Edge History"
@@ -422,19 +398,18 @@ class VDIIntegratorGUI(QMainWindow):
             table.setItem(row, 2, QTableWidgetItem(info['status']))
             table.setItem(row, 3, QTableWidgetItem(info['message']))
             
-            # 실패 시 빨간색 표시
             if info['status'] == "Failed":
                 for col in range(4):
                     table.item(row, col).setForeground(Qt.red)
 
     def on_finished(self, results):
         self.btn_start.setEnabled(True)
-        QMessageBox.information(self, "Done", "분석이 완료되었습니다.")
+        QMessageBox.information(self, "Done", "Analysis is complete.")
 
     def start_sid_mapping(self):
-        """매핑 시작 버튼 핸들러"""
+        """Mapping start button handler"""
         if not hasattr(self, 'extracted_info') or not self.extracted_info:
-            QMessageBox.warning(self, "경고", "먼저 VHD 분석을 완료하여 워크스페이스를 생성해야 합니다.")
+            QMessageBox.warning(self, "Warning", "Please complete VHD analysis first to create a workspace.")
             return
 
         self.btn_map_sid.setEnabled(False)
@@ -444,11 +419,11 @@ class VDIIntegratorGUI(QMainWindow):
         self.mapping_worker.start()
 
     def update_mapping_table(self, mapping_list):
-        """파싱된 데이터를 테이블에 출력하고 Edge 분석용 콤보박스 업데이트"""
+        """Display parsed data in the table and update combo box for Edge analysis"""
         self.mapping_table.setRowCount(0)
-        self.user_to_folder_map = {} # 초기화
+        self.user_to_folder_map = {} # Initialize the mapping dictionary
         
-        # 콤보박스가 이미 생성되어 있는지 확인 후 초기화
+        # Check if combo box already exists and clear it
         if hasattr(self, 'combo_user'):
             self.combo_user.clear()
 
@@ -462,12 +437,11 @@ class VDIIntegratorGUI(QMainWindow):
             self.mapping_table.setItem(row, 3, QTableWidgetItem(folder))
             self.mapping_table.setItem(row, 4, QTableWidgetItem(data.get('vhd', 'N/A')))
             
-            # [핵심] 유저 식별자 생성 (이름 + VHD명)
             user_id = data.get('user', 'Unknown')
             vhd_id = data.get('vhd', 'Unknown')
             display_name = f"{user_id} ({vhd_id})"
 
-            # 폴더명이 유효할 때만 콤보박스에 추가
+            # Add to combo box only if folder name is valid
             if folder and folder != "Unknown" and folder != "systemprofile":
                 self.user_to_folder_map[display_name] = folder
                 if hasattr(self, 'combo_user'):
@@ -476,11 +450,11 @@ class VDIIntegratorGUI(QMainWindow):
         self.mapping_table.setSortingEnabled(True)
         self.mapping_table.sortItems(0, Qt.DescendingOrder)
         
-        print(f"[DEBUG] 콤보박스 업데이트 완료: {list(self.user_to_folder_map.keys())}")
+        print(f"[DEBUG] Combo box update completed: {list(self.user_to_folder_map.keys())}")
 
     def run_targeted_edge_analysis(self):
-        """입력된 폴더명을 기반으로 워크스페이스 내 History 파싱"""
-        # 입력창에서 텍스트 직접 가져오기
+        """Parse History within workspace based on entered folder name"""
+        # Get text directly from input box
         folder_name = self.input_folder_name.text().strip()
 
         self.edge_table.setSortingEnabled(False)
@@ -494,27 +468,26 @@ class VDIIntegratorGUI(QMainWindow):
         self.edge_table.setRowCount(0)
         parser = EdgeHistoryParser()
 
-        # 파일명 규칙: Users_FolderName_AppData_Local_Microsoft_Edge_User_Data_Default_History
+        # Filename pattern: Users_FolderName_AppData_Local_Microsoft_Edge_User_Data_Default_History
         found_any = False
         
-        # 추출된 워크스페이스 정보들을 순회
+        # Iterate over extracted workspace information
         for info in self.extracted_info:
             workspace = info['workspace']
             vhd_id = info['vhd_id']
             
-            # TODO 공백 관리하기
+            # TODO Handle spaces in folder names if necessary
             target_filename = f"Users_{folder_name}_AppData_Local_Microsoft_Edge_User Data_Default\History"
             file_path = os.path.join(workspace, target_filename)
 
-            print(f"[DEBUG] 분석 시도 경로: {file_path}")
-
+            print(f"[DEBUG] Attempting analysis path: {file_path}")
             if os.path.exists(file_path):
-                print(f"[INFO] 분석 타겟 발견: {file_path}")
-                self.log_output.setText(f"분석 중: {folder_name}'s History")
+                print(f"[INFO] Analysis target found: {file_path}")
+                self.log_output.setText(f"Analyzing: {folder_name}'s History")
                 
                 history_data = parser.parse(file_path)
                 
-                # 테이블에 데이터 삽입
+                # Insert data into table
                 for data in history_data:
                     row = self.edge_table.rowCount()
                     self.edge_table.insertRow(row)
@@ -528,10 +501,10 @@ class VDIIntegratorGUI(QMainWindow):
         if found_any:
             self.edge_table.setSortingEnabled(True)
             self.edge_table.sortItems(0, Qt.DescendingOrder)
-            self.log_output.setText(f"{folder_name} 분석 완료")
+            self.log_output.setText(f"{folder_name} analysis completed")
         else:
-            QMessageBox.critical(self, "실패", 
-                f"워크스페이스에서 다음 파일을 찾지 못했습니다:\n{target_filename}\n\n폴더명이 정확한지 'User Mapping' 탭에서 확인하세요.")
+            QMessageBox.critical(self, "Failure", 
+                f"Could not find the following file in the workspace:\n{target_filename}\n\nPlease verify the folder name in the 'User Mapping' tab.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

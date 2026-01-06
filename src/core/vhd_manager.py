@@ -31,15 +31,13 @@ class EvidenceManager:
             try:
                 volume = pytsk3.Volume_Info(self.img_info)
                 for partition in volume:
-                    # 1. 너무 작은 파티션은 건너뜀 (예: 1GB 미만)
-                    if partition.len < 2048 * 1024: # 섹터 수 기준 (약 1GB)
+                    if partition.len < 2048 * 1024:
                         continue
 
                     offset = partition.start * 512
                     try:
                         temp_fs = pytsk3.FS_Info(self.img_info, offset=offset)
                         
-                        # 2. [검증 로직] 해당 파티션 루트에 Windows나 Users 폴더가 있는지 확인
                         root_dir = temp_fs.open_dir(path="/")
                         found_os = False
                         for entry in root_dir:
@@ -50,18 +48,17 @@ class EvidenceManager:
                         
                         if found_os:
                             self.fs_info = temp_fs
-                            print(f"[SUCCESS] OS 파티션 확정! Offset: {offset}")
-                            break # 진짜를 찾았으므로 종료
+                            print(f"[SUCCESS] OS Partition Found! Offset: {offset}")
+                            break 
                             
                     except:
                         continue
                 
-                # 끝까지 못 찾았을 경우 대비 (Logical Image 대응)
                 if not self.fs_info:
                     self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
                     
             except Exception as e:
-                print(f"[DEBUG] 파티션 분석 중 오류: {e}")
+                print(f"[DEBUG] Error analyzing partition: {e}")
                 try: self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
                 except: pass
 
@@ -91,23 +88,23 @@ class EvidenceManager:
         return users
 
     def extract_single_target(self, target_path):
-        """Users 폴더를 직접 스캔하여 개별 유저별 경로를 생성하고 추출"""
+        """Directly scan the Users folder to create and extract individual user paths"""
         clean_path = target_path.replace('\\', '/').lstrip('/')
         detailed_results = []
 
-        # 1. 'Users/*' 패턴이 포함된 경우 처리
+        # 1. Handle cases where the pattern 'Users/*' is included
         if 'Users/*' in target_path:
             base_after_user = clean_path.split('Users/*/')[-1]
             try:
-                # /Users 디렉토리를 열어 실제 폴더 목록 확보
+                # Open the /Users directory to get the actual folder list
                 users_dir = self.fs_info.open_dir(path="/Users")
                 
                 for entry in users_dir:
                     name = entry.info.name.name.decode('utf-8', 'replace')
                     if name in [".", "..", "Public", "All Users", "Default User"]:
-                        continue # 불필요한 시스템 링크 및 특수 폴더 제외
+                        continue 
 
-                    # 디렉토리 타입인지 확인 (TSK_FS_META_TYPE_DIR = 2)
+                    # Check if it is a directory type (TSK_FS_META_TYPE_DIR = 2)
                     if entry.info.meta and entry.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR:
                         user_specific_path = f"/Users/{name}/{base_after_user}"
                         
@@ -115,42 +112,40 @@ class EvidenceManager:
                         detailed_results.append({
                             'path': user_specific_path,
                             'success': success,
-                            'message': f"[{name}] 추출 성공" if success else f"[{name}] 추출 실패",
+                            'message': f"[{name}] Extraction successful" if success else f"[{name}] Extraction failed",
                             'user': name
                         })
             except Exception as e:
-                return [{'path': target_path, 'success': False, 'message': f"Users 스캔 실패: {e}"}]
-
-        # 2. 일반 경로(와일드카드 없음) 처리
+                return [{'path': target_path, 'success': False, 'message': f"Users scan failed: {e}"}]
         else:
             success = self._try_extract(clean_path)
             detailed_results.append({
                 'path': clean_path,
                 'success': success,
-                'message': "추출 성공" if success else "추출 실패",
+                'message': "Extraction successful" if success else "Extraction failed",
                 'user': "System"
             })
 
         return detailed_results
 
     def _try_extract(self, path):
-        """지정된 경로에서 파일 또는 폴더 추출 시도"""
+        """Attempt to extract a file or folder from the specified path"""
         clean_path = '/' + path.replace('\\', '/').lstrip('/')
-        print(f"[DEBUG] 추출 시도 경로: {clean_path}")
+        print(f"[DEBUG] Extraction attempt path: {clean_path}")
         try:
-            # 파일시스템 내에서 해당 경로에 무엇이 있는지(파일인지, 폴더인지, 아니면 없는 경로인지) 확인
+            # Check what is at the specified path in the filesystem (file, folder, or non-existent)
             entry = self.fs_info.open(clean_path)
-            # 일반 파일인 경우
+            # Regular file case
             if entry.info.meta.type == pytsk3.TSK_FS_META_TYPE_REG:
                 return self._save_entry(entry, clean_path)
-            # 경로인 경우
+            # Directory case
             elif entry.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR:
                 self._extract_dir(entry.as_directory(), clean_path)
                 return True
         except: return False
 
     def _extract_dir(self, directory, current_path):
-        """디렉토리 내 모든 항목 재귀 추출"""
+        """Recursively extract all items within a directory"""
         for entry in directory:
             name = entry.info.name.name.decode('utf-8', 'replace')
             if name in [".", ".."] or name.startswith('$'): continue
@@ -163,20 +158,20 @@ class EvidenceManager:
             except: continue
 
     def _save_entry(self, entry, full_path):
-        """파일시스템 항목을 워크스페이스 내의 해당 아티팩트 전용 폴더에 저장"""
+        """Save a filesystem entry to the dedicated artifact folder within the workspace"""
         try:
-            # 1. 상위 폴더 경로 추출 및 정리
-            # 예: '/Windows/Prefetch/CMD.EXE-123.pf' -> 'Windows_Prefetch'
+            # 1. Extract and clean the parent folder path
+            # Example: '/Windows/Prefetch/CMD.EXE-123.pf' -> 'Windows_Prefetch'
             dir_name = os.path.dirname(full_path).replace('\\', '/').strip('/')
             rel_dir = dir_name.replace('/', '_')
             
             target_dir = os.path.join(self.workspace, rel_dir)
 
-            # 2. 폴더 생성
+            # 2. Create the folder
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir, exist_ok=True)
 
-            # 3. 파일 저장
+            # 3. Save the file
             file_name = os.path.basename(full_path)
             save_path = os.path.join(target_dir, file_name)
 
@@ -189,5 +184,5 @@ class EvidenceManager:
                     offset += chunk
             return True
         except Exception as e:
-            logger.error(f"저장 실패 ({full_path}): {e}")
+            logger.error(f"Save failed ({full_path}): {e}")
             return False
