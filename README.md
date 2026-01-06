@@ -85,14 +85,15 @@ pip install -r requirements.txt
 ## 4.2. Analysis Workflow
 
 1. Load Evidence: Import multiple .E01 files into the analysis list.
-   ![1](img\1.png)
+   ![1](img/1.png)
 
 2. Select Artifacts: Choose the artifacts to extract. (Note: Security logs and SOFTWARE Hives are required for SID mapping.)
-   ![2](img\2.png)
+   ![2](img/2.png)
 3. Execute Analysis: Click 'Start Analysis' to begin automated extraction and parsing.
-   ![3](img\3.png)
+   ![3](img/3.png)
 4. Identity Attribution: Use the 'Extract Map SID' feature to correlate technical data with actual usernames.
-   ![4](img\4.png)
+   ![4](img/4.png)
 5. Data Review: Browse the integrated results in the result tabs.
-   ![5](img\5.png)
+   ![5](img/5.png)
+
 
