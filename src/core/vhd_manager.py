@@ -2,6 +2,7 @@ import os
 import pytsk3
 import pyewf
 import logging
+import pyvhdi
 import traceback
 from datetime import datetime
 
@@ -16,6 +17,21 @@ class EWFImgInfo(pytsk3.Img_Info):
         return self._ewf_handle.read(size)
     def get_size(self):
         return self._ewf_handle.get_media_size()
+    
+class VHDImgInfo(pytsk3.Img_Info):
+    def __init__(self, vhd_handle):
+        self._vhd_handle = vhd_handle
+        super(VHDImgInfo, self).__init__(url="", type=pytsk3.TSK_IMG_TYPE_EXTERNAL)
+    
+    def close(self):
+        self._vhd_handle.close()
+    
+    def read(self, offset, size):
+        self._vhd_handle.seek(offset)
+        return self._vhd_handle.read(size)
+    
+    def get_size(self):
+        return self._vhd_handle.get_media_size()
 
 class EvidenceManager:
     def __init__(self, image_path, workspace_base="workspace"):
@@ -29,38 +45,117 @@ class EvidenceManager:
 
         if self.img_info:
             try:
-                volume = pytsk3.Volume_Info(self.img_info)
-                for partition in volume:
-                    if partition.len < 2048 * 1024:
-                        continue
+                print(f"[DEBUG] Analyzing partitions...")
+                print(f"[DEBUG] Total image size: {self.img_info.get_size()} bytes")
+                
+                # 먼저 Volume (파티션 테이블) 읽기 시도
+                try:
+                    volume = pytsk3.Volume_Info(self.img_info)
+                    partition_count = 0
+                    
+                    for partition in volume:
+                        partition_count += 1
+                        print(f"[DEBUG] Partition {partition_count}:")
+                        print(f"  - Start: {partition.start} (bytes: {partition.start * 512})")
+                        print(f"  - Length: {partition.len} sectors")
+                        print(f"  - Description: {partition.desc.decode('utf-8', 'replace')}")
+                        print(f"  - Flags: {partition.flags}")
+                        
+                        # 너무 작은 파티션 스킵
+                        if partition.len < 2048:
+                            print(f"  -> Skipping (too small)")
+                            continue
 
-                    offset = partition.start * 512
-                    try:
-                        temp_fs = pytsk3.FS_Info(self.img_info, offset=offset)
+                        offset = partition.start * 512
                         
-                        root_dir = temp_fs.open_dir(path="/")
-                        found_os = False
-                        for entry in root_dir:
-                            name = entry.info.name.name.decode('utf-8', 'replace')
-                            if name.lower() in ["windows", "users"]:
-                                found_os = True
-                                break
-                        
-                        if found_os:
-                            self.fs_info = temp_fs
-                            print(f"[SUCCESS] OS Partition Found! Offset: {offset}")
-                            break 
+                        try:
+                            temp_fs = pytsk3.FS_Info(self.img_info, offset=offset)
+                            print(f"  -> FS_Info created successfully")
                             
-                    except:
-                        continue
+                            # Windows 디렉토리 확인
+                            try:
+                                temp_fs = pytsk3.FS_Info(self.img_info, offset=offset)
+                                print(f"  -> FS_Info created successfully")
+                                
+                                # 파일시스템이 열리면 일단 사용 (Windows 디렉토리 체크 제거)
+                                if not self.fs_info:
+                                    self.fs_info = temp_fs
+                                    print(f"[SUCCESS] Filesystem found at offset: {offset}")
+                                    
+                                    # 디렉토리 내용 확인 (디버그용)
+                                    try:
+                                        root_dir = temp_fs.open_dir(path="/")
+                                        print(f"  -> Root directory contents:")
+                                        for entry in root_dir:
+                                            if not hasattr(entry, 'info') or not hasattr(entry.info, 'name'):
+                                                continue
+                                            name = entry.info.name.name.decode('utf-8', 'replace')
+                                            if name not in ['.', '..']:
+                                                print(f"     - {name}")
+                                    except Exception as e:
+                                        print(f"  -> Could not list directory: {e}")
+                                    
+                                    break  # 첫 번째 유효한 파일시스템을 찾으면 종료
+                                    
+                            except Exception as e:
+                                print(f"  -> Failed to create FS_Info: {e}")
+                                continue
+                                
+                        except Exception as e:
+                            print(f"  -> Failed to create FS_Info: {e}")
+                            continue
+                    
+                    if partition_count == 0:
+                        print(f"[DEBUG] No partitions found in volume table")
+                        raise Exception("No partitions")
+                        
+                except Exception as vol_err:
+                    print(f"[DEBUG] Volume_Info failed: {vol_err}")
+                    print(f"[DEBUG] Trying common offsets for VHD without partition table...")
+                    
+                    # VHD가 파티션 테이블 없이 직접 파일시스템일 수 있음
+                    common_offsets = [
+                        0,           # 파티션 테이블 없음
+                        512,         # 1 섹터
+                        1024,        # 2 섹터
+                        2048,        # 4 섹터
+                        32256,       # 63 섹터 (레거시 DOS)
+                        1048576,     # 2048 섹터 (1MB, 현대적 정렬)
+                    ]
+                    
+                    for offset in common_offsets:
+                        print(f"[DEBUG] Trying offset: {offset} bytes ({offset//512} sectors)")
+                        try:
+                            temp_fs = pytsk3.FS_Info(self.img_info, offset=offset)
+                            
+                            # 루트 디렉토리 접근 시도
+                            root_dir = temp_fs.open_dir(path="/")
+                            found_os = False
+                            
+                            for entry in root_dir:
+                                name = entry.info.name.name.decode('utf-8', 'replace')
+                                print(f"  Found: {name}")
+                                if name.lower() in ["windows", "users", "program files"]:
+                                    found_os = True
+                                    print(f"  -> Found OS indicator: {name}")
+                            
+                            if found_os:
+                                self.fs_info = temp_fs
+                                print(f"[SUCCESS] Filesystem found at offset: {offset}")
+                                break
+                            else:
+                                print(f"  -> No OS directories found at this offset")
+                                
+                        except Exception as e:
+                            print(f"  -> Failed: {str(e)[:100]}")
+                            continue
                 
                 if not self.fs_info:
-                    self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
+                    print(f"[ERROR] Could not find valid filesystem in VHD")
                     
             except Exception as e:
-                print(f"[DEBUG] Error analyzing partition: {e}")
-                try: self.fs_info = pytsk3.FS_Info(self.img_info, offset=0)
-                except: pass
+                print(f"[ERROR] Exception during partition analysis: {e}")
+                print(traceback.format_exc())
 
     def _init_image_handle(self):
         try:
@@ -69,8 +164,18 @@ class EvidenceManager:
                 handle = pyewf.handle()
                 handle.open(filenames)
                 return EWFImgInfo(handle)
-            return pytsk3.Img_Info(self.image_path)
+            elif self.extension in ['.vhd', '.vhdx']:
+                handle = pyvhdi.file()
+                handle.open(self.image_path)
+                print(f"[DEBUG] VHD opened: {self.image_path}")
+                print(f"[DEBUG] VHD media size: {handle.get_media_size()}")
+                return VHDImgInfo(handle)
+            else:
+                return pytsk3.Img_Info(self.image_path)
         except Exception as e:
+            print(f"[ERROR] Image initialization failed: {e}")
+            print(traceback.format_exc())
+            logger.error(f"Image initialization failed: {e}")
             return None
 
     def _get_user_list(self):
@@ -92,38 +197,43 @@ class EvidenceManager:
         clean_path = target_path.replace('\\', '/').lstrip('/')
         detailed_results = []
 
+        # Windows 디렉토리 체크 제거 - 모든 경로 시도
+        if not self.fs_info:
+            print(f"[WARNING] No filesystem available")
+            return [{'path': target_path, 'success': False, 'message': 'No filesystem loaded'}]
+
         # 1. Handle cases where the pattern 'Users/*' is included
         if 'Users/*' in target_path:
             base_after_user = clean_path.split('Users/*/')[-1]
             try:
-                # Open the /Users directory to get the actual folder list
                 users_dir = self.fs_info.open_dir(path="/Users")
-                
                 for entry in users_dir:
+                    if not hasattr(entry.info, 'name'): 
+                        continue
                     name = entry.info.name.name.decode('utf-8', 'replace')
-                    if name in [".", "..", "Public", "All Users", "Default User"]:
-                        continue 
-
-                    # Check if it is a directory type (TSK_FS_META_TYPE_DIR = 2)
-                    if entry.info.meta and entry.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR:
-                        user_specific_path = f"/Users/{name}/{base_after_user}"
-                        
-                        success = self._try_extract(user_specific_path)
-                        detailed_results.append({
-                            'path': user_specific_path,
-                            'success': success,
-                            'message': f"[{name}] Extraction successful" if success else f"[{name}] Extraction failed",
-                            'user': name
-                        })
+                    if name in ['.', '..'] or entry.info.meta is None: 
+                        continue
+                    
+                    user_path = f"Users/{name}/{base_after_user}"
+                    success = self._try_extract(user_path)
+                    detailed_results.append({
+                        'path': user_path,
+                        'success': success,
+                        'message': "Success" if success else "Not Found"
+                    })
             except Exception as e:
-                return [{'path': target_path, 'success': False, 'message': f"Users scan failed: {e}"}]
+                print(f"[ERROR] Failed to scan Users folder: {e}")
+                detailed_results.append({
+                    'path': target_path,
+                    'success': False,
+                    'message': f"Users folder not accessible: {str(e)}"
+                })
         else:
             success = self._try_extract(clean_path)
             detailed_results.append({
                 'path': clean_path,
                 'success': success,
-                'message': "Extraction successful" if success else "Extraction failed",
-                'user': "System"
+                'message': "Success" if success else "Not Found"
             })
 
         return detailed_results

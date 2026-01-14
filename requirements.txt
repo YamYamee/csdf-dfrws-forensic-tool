@@ -12,4 +12,6 @@ pyyaml==6.0.1
 
 libewf-python==20240506
 
+libvhdi-python==20251119
+
 python-evtx==0.6.1

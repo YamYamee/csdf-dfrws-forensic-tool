@@ -295,7 +295,7 @@ class VDIIntegratorGUI(QMainWindow):
 
             table_to_resize = self.artifact_tables[name]
             table_to_resize.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            self.tabs.addTab(tab, f"{name} 결과")
+            self.tabs.addTab(tab, f"{name} Results")
 
         self.result_tree.clear()
         self.tabs.setCurrentIndex(1) 
